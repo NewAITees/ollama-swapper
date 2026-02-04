@@ -1,3 +1,5 @@
+# Pytest path setup so tests can import from src/ without installation.
+# Usage: loaded automatically by pytest.
 import sys
 from pathlib import Path
 

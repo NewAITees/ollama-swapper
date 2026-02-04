@@ -1,3 +1,5 @@
+# Tests for policy resolution and payload mutation.
+# Usage: pytest tests/test_policy.py
 from ollama_swapper.config import PolicyConfig, PolicyDefaults, ModelPolicy
 from ollama_swapper.policy import apply_policy
 

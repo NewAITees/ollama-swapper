@@ -1,3 +1,5 @@
+# Tests for parsing `ollama ps` output into model names.
+# Usage: pytest tests/test_sweep.py
 from ollama_swapper.sweep import parse_ps_output
 
 

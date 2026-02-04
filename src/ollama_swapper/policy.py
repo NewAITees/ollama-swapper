@@ -1,3 +1,5 @@
+# Policy resolution and injection for Ollama request payloads.
+# Usage: apply_policy(payload_dict, policy_config)
 from __future__ import annotations
 
 from typing import Any, Mapping

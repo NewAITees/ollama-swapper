@@ -1,3 +1,5 @@
+# Config loader and data structures for server/policy settings.
+# Usage: load_config("/path/to/config.yaml") or load_config("/path/to/config.json")
 from __future__ import annotations
 
 import json

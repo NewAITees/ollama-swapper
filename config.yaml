@@ -1,0 +1,38 @@
+server:
+  listen: "127.0.0.1:11434"
+  upstream: "http://127.0.0.1:11436"
+policy:
+  defaults:
+    num_ctx: 8192
+    keep_alive: "60s"
+  models:
+    "qwen3-coder:30b":
+      num_ctx: 187098
+    "glm-4.7-flash:latest":
+      num_ctx: 26127
+    "deepseek-coder-v2:16b":
+      num_ctx: 135419
+    "gemma3:12b":
+      num_ctx: 94613
+    "qwen3:8b":
+      num_ctx: 274479
+    "openbmb/minicpm-v4.5:latest":
+      num_ctx: 274493
+    "gpt-oss:20b":
+      num_ctx: 655697
+    "llava:7b":
+      num_ctx: 318927
+    "deepseek-r1:8b":
+      num_ctx: 274479
+    "qwen3:14b":
+      num_ctx: 190822
+    "llama3.1:8b":
+      num_ctx: 310504
+    "qwen3:14b-16k":
+      num_ctx: 190822
+    "qwen3:8b-16k":
+      num_ctx: 274479
+    "deepseek-r1:14b":
+      num_ctx: 159004
+    "gemma3:27b":
+      num_ctx: 20301

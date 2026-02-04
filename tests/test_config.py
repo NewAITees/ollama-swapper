@@ -1,3 +1,5 @@
+# Tests for YAML/JSON config loading and parsing behavior.
+# Usage: pytest tests/test_config.py
 from pathlib import Path
 
 from ollama_swapper.config import load_config

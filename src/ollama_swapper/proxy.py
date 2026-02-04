@@ -1,3 +1,5 @@
+# FastAPI proxy that forwards requests to Ollama and injects policy defaults.
+# Usage: build_proxy_app(config) then run via uvicorn (see cli.py).
 from __future__ import annotations
 
 import json
@@ -8,6 +10,7 @@ from urllib.parse import urljoin
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from .config import AppConfig
 from .policy import apply_policy
@@ -51,21 +54,26 @@ def build_proxy_app(config: AppConfig) -> FastAPI:
                 body = json.dumps(payload).encode("utf-8")
                 headers["content-length"] = str(len(body))
 
-        async with httpx.AsyncClient(timeout=None) as client:
-            upstream_response = await client.request(
-                method,
-                upstream_url,
-                content=body,
-                headers=headers,
-                params=request.query_params,
-                stream=True,
-            )
+        client = httpx.AsyncClient(timeout=None)
+        upstream_request = client.build_request(
+            method,
+            upstream_url,
+            content=body,
+            headers=headers,
+            params=request.query_params,
+        )
+        upstream_response = await client.send(upstream_request, stream=True)
 
-            response_headers = dict(upstream_response.headers)
-            return StreamingResponse(
-                _stream_response(upstream_response),
-                status_code=upstream_response.status_code,
-                headers=response_headers,
-            )
+        async def _close_upstream() -> None:
+            await upstream_response.aclose()
+            await client.aclose()
+
+        response_headers = dict(upstream_response.headers)
+        return StreamingResponse(
+            _stream_response(upstream_response),
+            status_code=upstream_response.status_code,
+            headers=response_headers,
+            background=BackgroundTask(_close_upstream),
+        )
 
     return app

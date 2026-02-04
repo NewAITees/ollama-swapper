@@ -1,3 +1,5 @@
+# Helpers for listing and stopping loaded Ollama models via the CLI.
+# Usage: run_ps() -> parse_ps_output() -> stop_models(models)
 from __future__ import annotations
 
 import subprocess

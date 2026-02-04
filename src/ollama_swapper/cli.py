@@ -1,3 +1,7 @@
+# CLI entry points for the proxy and model management commands.
+# Usage examples:
+#   ollama-swapper proxy --config /path/to/config.yaml
+#   ollama-swapper ps | ollama-swapper sweep | ollama-swapper stop llama3:latest
 from __future__ import annotations
 
 import json

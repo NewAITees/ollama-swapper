@@ -55,3 +55,14 @@ ollama-swapper stop llama3:latest
 - Recommended ports: run the proxy on `11434` and Ollama itself on `11436`.
 - The proxy only injects `options.num_ctx` and `keep_alive` when the client omits them.
 - If you bypass the proxy, use `ollama-swapper sweep` to reclaim VRAM.
+
+## Change Ollama default port
+You can change Ollama's listen host/port with the `OLLAMA_HOST` environment variable.
+
+Example (PowerShell):
+```powershell
+$env:OLLAMA_HOST="127.0.0.1:11436"
+ollama serve
+```
+
+After changing this, set `server.upstream` in `config.yaml` to the same address.
