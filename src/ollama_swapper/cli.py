@@ -21,12 +21,18 @@ app = typer.Typer(help="Ollama swapper CLI")
 @app.command("proxy")
 def proxy_start(
     config: Path = typer.Option(..., "--config", "-c", exists=True),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Start the proxy server."""
     loaded_config = load_config(config)
     listen = parse_listen(loaded_config.server.listen)
-    proxy_app = build_proxy_app(loaded_config)
-    uvicorn.run(proxy_app, host=listen.host, port=listen.port)
+    proxy_app = build_proxy_app(loaded_config, verbose=verbose)
+    uvicorn.run(
+        proxy_app,
+        host=listen.host,
+        port=listen.port,
+        log_level="debug" if verbose else "info",
+    )
 
 
 @app.command("ps")
