@@ -39,13 +39,36 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
+def _convert_tool_calls(openai_tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """Convert OpenAI tool_calls to Ollama format.
+
+    OpenAI: {"id": ..., "type": "function", "function": {"name": ..., "arguments": "<json string>"}}
+    Ollama: {"function": {"name": ..., "arguments": <parsed dict>}}
+    """
+    result = []
+    for tc in openai_tool_calls:
+        fn = tc.get("function") or {}
+        args_raw = fn.get("arguments", "")
+        try:
+            args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+        except json.JSONDecodeError:
+            args = args_raw
+        result.append({"function": {"name": fn.get("name", ""), "arguments": args}})
+    return result
+
+
 def _ollama_chat_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "model": payload.get("model"),
         "messages": payload.get("messages", []),
         "stream": payload.get("stream", False),
         "max_tokens": -1,
     }
+    if payload.get("tools"):
+        result["tools"] = payload["tools"]
+    if payload.get("think"):
+        result["enable_thinking"] = True
+    return result
 
 
 def _ollama_generate_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
@@ -59,16 +82,23 @@ def _ollama_generate_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _openai_chat_to_ollama(payload: dict[str, Any], model: str | None) -> dict[str, Any]:
     content = ""
+    thinking: str | None = None
+    tool_calls: list[Any] | None = None
     for choice in payload.get("choices", []):
         message = choice.get("message") or {}
         if message.get("content") is not None:
             content = message.get("content") or ""
-            break
-    return {
-        "model": model,
-        "message": {"role": "assistant", "content": content},
-        "done": True,
-    }
+        if message.get("reasoning_content") is not None:
+            thinking = message["reasoning_content"]
+        if message.get("tool_calls"):
+            tool_calls = _convert_tool_calls(message["tool_calls"])
+        break
+    msg: dict[str, Any] = {"role": "assistant", "content": content}
+    if thinking is not None:
+        msg["thinking"] = thinking
+    if tool_calls is not None:
+        msg["tool_calls"] = tool_calls
+    return {"model": model, "message": msg, "done": True}
 
 
 def _openai_generate_to_ollama(payload: dict[str, Any], model: str | None) -> dict[str, Any]:
@@ -85,6 +115,9 @@ def _openai_generate_to_ollama(payload: dict[str, Any], model: str | None) -> di
 
 
 async def _stream_openai_chat(response: httpx.Response, model: str | None) -> AsyncIterator[bytes]:
+    # tool_calls fragments are accumulated by index and emitted in the done chunk.
+    tool_calls_buf: dict[int, dict[str, Any]] = {}
+
     async for line in response.aiter_lines():
         if not line or not line.startswith("data:"):
             continue
@@ -92,7 +125,12 @@ async def _stream_openai_chat(response: httpx.Response, model: str | None) -> As
         if not data:
             continue
         if data == "[DONE]":
-            yield _json_bytes({"model": model, "done": True}) + b"\n"
+            done_msg: dict[str, Any] = {"role": "assistant", "content": ""}
+            if tool_calls_buf:
+                done_msg["tool_calls"] = _convert_tool_calls(
+                    [tool_calls_buf[i] for i in sorted(tool_calls_buf)]
+                )
+            yield _json_bytes({"model": model, "message": done_msg, "done": True}) + b"\n"
             break
         try:
             payload = json.loads(data)
@@ -100,16 +138,42 @@ async def _stream_openai_chat(response: httpx.Response, model: str | None) -> As
             continue
         for choice in payload.get("choices", []):
             delta = choice.get("delta") or {}
+
+            # thinking content (reasoning_content or thinking field)
+            thinking = delta.get("reasoning_content") or delta.get("thinking")
+            if thinking:
+                yield _json_bytes(
+                    {
+                        "model": model,
+                        "message": {"role": "assistant", "content": "", "thinking": thinking},
+                        "done": False,
+                    }
+                ) + b"\n"
+
+            # regular content
             content = delta.get("content")
-            if content is None:
-                continue
-            yield _json_bytes(
-                {
-                    "model": model,
-                    "message": {"role": "assistant", "content": content},
-                    "done": False,
-                }
-            ) + b"\n"
+            if content:
+                yield _json_bytes(
+                    {
+                        "model": model,
+                        "message": {"role": "assistant", "content": content},
+                        "done": False,
+                    }
+                ) + b"\n"
+
+            # tool_calls fragments — accumulate by index
+            for tc_delta in delta.get("tool_calls") or []:
+                idx = tc_delta.get("index", 0)
+                if idx not in tool_calls_buf:
+                    tool_calls_buf[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                buf = tool_calls_buf[idx]
+                if tc_delta.get("id"):
+                    buf["id"] = tc_delta["id"]
+                fn_delta = tc_delta.get("function") or {}
+                if fn_delta.get("name"):
+                    buf["function"]["name"] = fn_delta["name"]
+                if fn_delta.get("arguments"):
+                    buf["function"]["arguments"] += fn_delta["arguments"]
 
 
 async def _stream_openai_generate(
