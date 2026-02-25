@@ -20,6 +20,7 @@ policy:
     "llama3.1:8b-instruct-q4_K_M":
       num_ctx: 32768
       keep_alive: "60s"
+      upstream: "http://127.0.0.1:18765"
 """.strip()
     )
 
@@ -28,3 +29,7 @@ policy:
     assert config.server.listen == "127.0.0.1:11434"
     assert config.policy.defaults.num_ctx == 8192
     assert config.policy.models["llama3.1:8b-instruct-q4_K_M"].keep_alive == "60s"
+    assert (
+        config.policy.models["llama3.1:8b-instruct-q4_K_M"].upstream
+        == "http://127.0.0.1:18765"
+    )

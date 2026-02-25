@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .config import PolicyConfig
+from .config import AppConfig, PolicyConfig
 
 
 def _resolve_policy(model: str | None, policy: PolicyConfig) -> Mapping[str, Any]:
@@ -19,6 +19,14 @@ def _resolve_policy(model: str | None, policy: PolicyConfig) -> Mapping[str, Any
         if model_policy.keep_alive is not None:
             resolved["keep_alive"] = model_policy.keep_alive
     return resolved
+
+
+def resolve_upstream(model: str | None, config: AppConfig) -> str:
+    if model and model in config.policy.models:
+        model_policy = config.policy.models[model]
+        if model_policy.upstream:
+            return model_policy.upstream
+    return config.server.upstream
 
 
 def apply_policy(payload: dict[str, Any], policy: PolicyConfig) -> dict[str, Any]:

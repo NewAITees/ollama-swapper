@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from urllib.parse import urljoin
 
 import httpx
@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
 from .config import AppConfig
-from .policy import apply_policy
+from .policy import apply_policy, resolve_upstream
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,112 @@ async def _stream_response(response: httpx.Response) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload).encode("utf-8")
+
+
+def _ollama_chat_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": payload.get("model"),
+        "messages": payload.get("messages", []),
+        "stream": payload.get("stream", False),
+        "max_tokens": -1,
+    }
+
+
+def _ollama_generate_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": payload.get("model"),
+        "prompt": payload.get("prompt", ""),
+        "stream": payload.get("stream", False),
+        "max_tokens": -1,
+    }
+
+
+def _openai_chat_to_ollama(payload: dict[str, Any], model: str | None) -> dict[str, Any]:
+    content = ""
+    for choice in payload.get("choices", []):
+        message = choice.get("message") or {}
+        if message.get("content") is not None:
+            content = message.get("content") or ""
+            break
+    return {
+        "model": model,
+        "message": {"role": "assistant", "content": content},
+        "done": True,
+    }
+
+
+def _openai_generate_to_ollama(payload: dict[str, Any], model: str | None) -> dict[str, Any]:
+    content = ""
+    for choice in payload.get("choices", []):
+        if choice.get("text") is not None:
+            content = choice.get("text") or ""
+            break
+    return {
+        "model": model,
+        "response": content,
+        "done": True,
+    }
+
+
+async def _stream_openai_chat(response: httpx.Response, model: str | None) -> AsyncIterator[bytes]:
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data:
+            continue
+        if data == "[DONE]":
+            yield _json_bytes({"model": model, "done": True}) + b"\n"
+            break
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        for choice in payload.get("choices", []):
+            delta = choice.get("delta") or {}
+            content = delta.get("content")
+            if content is None:
+                continue
+            yield _json_bytes(
+                {
+                    "model": model,
+                    "message": {"role": "assistant", "content": content},
+                    "done": False,
+                }
+            ) + b"\n"
+
+
+async def _stream_openai_generate(
+    response: httpx.Response, model: str | None
+) -> AsyncIterator[bytes]:
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data:
+            continue
+        if data == "[DONE]":
+            yield _json_bytes({"model": model, "done": True}) + b"\n"
+            break
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        for choice in payload.get("choices", []):
+            text = choice.get("text")
+            if text is None:
+                continue
+            yield _json_bytes(
+                {
+                    "model": model,
+                    "response": text,
+                    "done": False,
+                }
+            ) + b"\n"
+
+
 def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
     app = FastAPI()
     logger = logging.getLogger("ollama_swapper.proxy")
@@ -43,10 +149,11 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def proxy(path: str, request: Request) -> Response:
-        upstream_url = urljoin(config.server.upstream.rstrip("/") + "/", path)
         body = await request.body()
         headers = dict(request.headers)
         method = request.method
+        payload: dict[str, Any] | None = None
+        model: str | None = None
 
         if path in {"api/chat", "api/generate"} and body:
             try:
@@ -68,6 +175,7 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
                     before_keep_alive,
                     after_keep_alive,
                 )
+                model = payload.get("model")
                 body = json.dumps(payload).encode("utf-8")
                 headers["content-length"] = str(len(body))
             elif payload is not None:
@@ -76,6 +184,33 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
                     type(payload).__name__,
                     path,
                 )
+
+        upstream_base = resolve_upstream(model, config)
+        use_openai = (
+            upstream_base != config.server.upstream
+            and path in {"api/chat", "api/generate"}
+            and isinstance(payload, dict)
+        )
+        if use_openai:
+            if path == "api/chat":
+                upstream_path = "v1/chat/completions"
+                openai_payload = _ollama_chat_to_openai(payload)
+                stream = bool(openai_payload.get("stream"))
+                stream_adapter = _stream_openai_chat
+                response_adapter = _openai_chat_to_ollama
+            else:
+                upstream_path = "v1/completions"
+                openai_payload = _ollama_generate_to_openai(payload)
+                stream = bool(openai_payload.get("stream"))
+                stream_adapter = _stream_openai_generate
+                response_adapter = _openai_generate_to_ollama
+
+            upstream_url = urljoin(upstream_base.rstrip("/") + "/", upstream_path)
+            body = _json_bytes(openai_payload)
+            headers["content-type"] = "application/json"
+            headers["content-length"] = str(len(body))
+        else:
+            upstream_url = urljoin(upstream_base.rstrip("/") + "/", path)
 
         client = httpx.AsyncClient(timeout=None)
         upstream_request = client.build_request(
@@ -101,12 +236,34 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
             await upstream_response.aclose()
             await client.aclose()
 
-        response_headers = dict(upstream_response.headers)
-        return StreamingResponse(
-            _stream_response(upstream_response),
+        if upstream_response.status_code >= 400 or not use_openai:
+            response_headers = dict(upstream_response.headers)
+            return StreamingResponse(
+                _stream_response(upstream_response),
+                status_code=upstream_response.status_code,
+                headers=response_headers,
+                background=BackgroundTask(_close_upstream),
+            )
+
+        if stream:
+            return StreamingResponse(
+                stream_adapter(upstream_response, model),
+                status_code=upstream_response.status_code,
+                headers={"content-type": "application/x-ndjson"},
+                background=BackgroundTask(_close_upstream),
+            )
+
+        raw = await upstream_response.aread()
+        await _close_upstream()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return Response(raw, status_code=upstream_response.status_code)
+        converted = response_adapter(parsed, model)
+        return Response(
+            _json_bytes(converted),
             status_code=upstream_response.status_code,
-            headers=response_headers,
-            background=BackgroundTask(_close_upstream),
+            media_type="application/json",
         )
 
     return app

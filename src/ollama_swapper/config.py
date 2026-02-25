@@ -26,6 +26,7 @@ class PolicyDefaults:
 class ModelPolicy:
     num_ctx: int | None = None
     keep_alive: int | str | None = None
+    upstream: str | None = None
 
 
 @dataclass
@@ -59,6 +60,7 @@ def _parse_model_policy(raw: Mapping[str, Any]) -> ModelPolicy:
     return ModelPolicy(
         num_ctx=raw.get("num_ctx"),
         keep_alive=raw.get("keep_alive"),
+        upstream=raw.get("upstream"),
     )
 
 
