@@ -56,6 +56,18 @@ ollama-swapper sweep
 ollama-swapper stop llama3:latest
 ```
 
+## Thinking / Extended Reasoning
+
+Reasoning models (DeepSeek-R1, QwQ, Qwen3, etc.) can stream internal thinking alongside their answer.
+By default the proxy strips thinking content and returns only the final response.
+Set `include_thinking: true` in the request body to receive thinking chunks as well.
+
+```json
+{"model": "deepseek-r1:8b", "think": true, "include_thinking": true, "messages": [...]}
+```
+
+See [docs/thinking.md](docs/thinking.md) for full details.
+
 ## Operational notes
 - Recommended ports: run the proxy on `11434` and Ollama itself on `11436`.
 - The proxy only injects `options.num_ctx` and `keep_alive` when the client omits them.

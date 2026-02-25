@@ -35,6 +35,30 @@ async def _stream_response(response: httpx.Response) -> AsyncIterator[bytes]:
         yield chunk
 
 
+async def _stream_filter_thinking(
+    response: httpx.Response, include_thinking: bool
+) -> AsyncIterator[bytes]:
+    """Stream native Ollama NDJSON, optionally stripping message.thinking fields."""
+    async for line in response.aiter_lines():
+        if not line:
+            continue
+        if include_thinking:
+            yield line.encode("utf-8") + b"\n"
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            yield line.encode("utf-8") + b"\n"
+            continue
+        msg = parsed.get("message")
+        if isinstance(msg, dict) and "thinking" in msg:
+            del msg["thinking"]
+            # skip chunks that had only thinking and no content
+            if not msg.get("content") and not parsed.get("done"):
+                continue
+        yield json.dumps(parsed).encode("utf-8") + b"\n"
+
+
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
@@ -80,7 +104,9 @@ def _ollama_generate_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _openai_chat_to_ollama(payload: dict[str, Any], model: str | None) -> dict[str, Any]:
+def _openai_chat_to_ollama(
+    payload: dict[str, Any], model: str | None, include_thinking: bool = False
+) -> dict[str, Any]:
     content = ""
     thinking: str | None = None
     tool_calls: list[Any] | None = None
@@ -94,7 +120,7 @@ def _openai_chat_to_ollama(payload: dict[str, Any], model: str | None) -> dict[s
             tool_calls = _convert_tool_calls(message["tool_calls"])
         break
     msg: dict[str, Any] = {"role": "assistant", "content": content}
-    if thinking is not None:
+    if thinking is not None and include_thinking:
         msg["thinking"] = thinking
     if tool_calls is not None:
         msg["tool_calls"] = tool_calls
@@ -114,7 +140,9 @@ def _openai_generate_to_ollama(payload: dict[str, Any], model: str | None) -> di
     }
 
 
-async def _stream_openai_chat(response: httpx.Response, model: str | None) -> AsyncIterator[bytes]:
+async def _stream_openai_chat(
+    response: httpx.Response, model: str | None, include_thinking: bool = False
+) -> AsyncIterator[bytes]:
     # tool_calls fragments are accumulated by index and emitted in the done chunk.
     tool_calls_buf: dict[int, dict[str, Any]] = {}
 
@@ -141,7 +169,7 @@ async def _stream_openai_chat(response: httpx.Response, model: str | None) -> As
 
             # thinking content (reasoning_content or thinking field)
             thinking = delta.get("reasoning_content") or delta.get("thinking")
-            if thinking:
+            if thinking and include_thinking:
                 yield _json_bytes(
                     {
                         "model": model,
@@ -218,6 +246,7 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
         method = request.method
         payload: dict[str, Any] | None = None
         model: str | None = None
+        include_thinking: bool = False
 
         if path in {"api/chat", "api/generate"} and body:
             try:
@@ -226,6 +255,7 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
                 logger.debug("skipping policy injection: invalid json body path=%s", path)
                 payload = None
             if isinstance(payload, dict):
+                include_thinking = bool(payload.pop("include_thinking", False))
                 before_options = dict(payload.get("options") or {})
                 before_keep_alive = payload.get("keep_alive")
                 payload = apply_policy(payload, config.policy)
@@ -260,8 +290,8 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
                 upstream_path = "v1/chat/completions"
                 openai_payload = _ollama_chat_to_openai(payload)
                 stream = bool(openai_payload.get("stream"))
-                stream_adapter = _stream_openai_chat
-                response_adapter = _openai_chat_to_ollama
+                stream_adapter = lambda r, m: _stream_openai_chat(r, m, include_thinking)
+                response_adapter = lambda p, m: _openai_chat_to_ollama(p, m, include_thinking)
             else:
                 upstream_path = "v1/completions"
                 openai_payload = _ollama_generate_to_openai(payload)
@@ -302,8 +332,18 @@ def build_proxy_app(config: AppConfig, verbose: bool = False) -> FastAPI:
 
         if upstream_response.status_code >= 400 or not use_openai:
             response_headers = dict(upstream_response.headers)
+            use_thinking_filter = (
+                path == "api/chat"
+                and not use_openai
+                and upstream_response.status_code < 400
+            )
+            stream_fn = (
+                _stream_filter_thinking(upstream_response, include_thinking)
+                if use_thinking_filter
+                else _stream_response(upstream_response)
+            )
             return StreamingResponse(
-                _stream_response(upstream_response),
+                stream_fn,
                 status_code=upstream_response.status_code,
                 headers=response_headers,
                 background=BackgroundTask(_close_upstream),

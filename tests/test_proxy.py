@@ -8,6 +8,7 @@ import pytest
 from ollama_swapper.proxy import (
     _ollama_chat_to_openai,
     _openai_chat_to_ollama,
+    _stream_filter_thinking,
     _stream_openai_chat,
     _stream_openai_generate,
     parse_listen,
@@ -124,20 +125,31 @@ def test_openai_chat_to_ollama_converts_tool_calls() -> None:
     assert tc[0]["function"]["arguments"] == {"location": "Tokyo"}
 
 
-def test_openai_chat_to_ollama_converts_reasoning_content() -> None:
+def test_openai_chat_to_ollama_strips_reasoning_by_default() -> None:
     openai_resp = {
         "choices": [{
             "message": {"content": "answer", "reasoning_content": "step by step"},
         }]
     }
     result = _openai_chat_to_ollama(openai_resp, "m")
+    assert "thinking" not in result["message"]
+    assert result["message"]["content"] == "answer"
+
+
+def test_openai_chat_to_ollama_includes_reasoning_when_flag_set() -> None:
+    openai_resp = {
+        "choices": [{
+            "message": {"content": "answer", "reasoning_content": "step by step"},
+        }]
+    }
+    result = _openai_chat_to_ollama(openai_resp, "m", include_thinking=True)
     assert result["message"]["thinking"] == "step by step"
     assert result["message"]["content"] == "answer"
 
 
 # --- _stream_openai_chat thinking ---
 
-def test_stream_openai_chat_thinking_chunks() -> None:
+def test_stream_openai_chat_strips_thinking_by_default() -> None:
     lines = [
         f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': 'hmm'}}]})}",
         f"data: {json.dumps({'choices': [{'delta': {'content': 'hello'}}]})}",
@@ -147,8 +159,22 @@ def test_stream_openai_chat_thinking_chunks() -> None:
     chunks = asyncio.run(_collect_async(_stream_openai_chat(response, "m")))
     decoded = [json.loads(c) for c in chunks]
 
+    # thinking chunk is suppressed; first chunk is the content chunk
+    assert decoded[0]["message"]["content"] == "hello"
+    assert decoded[1]["done"] is True
+
+
+def test_stream_openai_chat_includes_thinking_when_flag_set() -> None:
+    lines = [
+        f"data: {json.dumps({'choices': [{'delta': {'reasoning_content': 'hmm'}}]})}",
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'hello'}}]})}",
+        "data: [DONE]",
+    ]
+    response = _FakeOpenAIResponse(lines)
+    chunks = asyncio.run(_collect_async(_stream_openai_chat(response, "m", include_thinking=True)))
+    decoded = [json.loads(c) for c in chunks]
+
     assert decoded[0]["message"]["thinking"] == "hmm"
-    assert decoded[0]["done"] is False
     assert decoded[1]["message"]["content"] == "hello"
     assert decoded[2]["done"] is True
 
@@ -170,3 +196,58 @@ def test_stream_openai_chat_tool_calls_accumulated() -> None:
     tc = done_chunk["message"]["tool_calls"]
     assert tc[0]["function"]["name"] == "fn"
     assert tc[0]["function"]["arguments"] == {"k": "v"}
+
+
+# --- _stream_filter_thinking (native Ollama) ---
+
+class _FakeOllamaResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def aiter_lines(self) -> object:
+        for line in self._lines:
+            yield line
+
+
+def test_stream_filter_thinking_strips_by_default() -> None:
+    lines = [
+        json.dumps({"model": "m", "message": {"role": "assistant", "content": "", "thinking": "let me think"}, "done": False}),
+        json.dumps({"model": "m", "message": {"role": "assistant", "content": "answer"}, "done": False}),
+        json.dumps({"model": "m", "done": True}),
+    ]
+    response = _FakeOllamaResponse(lines)
+    chunks = asyncio.run(_collect_async(_stream_filter_thinking(response, include_thinking=False)))
+    decoded = [json.loads(c) for c in chunks]
+
+    # thinking-only chunk is dropped; first chunk is the content chunk
+    assert decoded[0]["message"]["content"] == "answer"
+    assert "thinking" not in decoded[0]["message"]
+    assert decoded[1]["done"] is True
+
+
+def test_stream_filter_thinking_includes_when_flag_set() -> None:
+    lines = [
+        json.dumps({"model": "m", "message": {"role": "assistant", "content": "", "thinking": "let me think"}, "done": False}),
+        json.dumps({"model": "m", "message": {"role": "assistant", "content": "answer"}, "done": False}),
+        json.dumps({"model": "m", "done": True}),
+    ]
+    response = _FakeOllamaResponse(lines)
+    chunks = asyncio.run(_collect_async(_stream_filter_thinking(response, include_thinking=True)))
+    decoded = [json.loads(c) for c in chunks]
+
+    assert decoded[0]["message"]["thinking"] == "let me think"
+    assert decoded[1]["message"]["content"] == "answer"
+    assert decoded[2]["done"] is True
+
+
+def test_stream_filter_thinking_passes_non_thinking_chunks_unchanged() -> None:
+    lines = [
+        json.dumps({"model": "m", "message": {"role": "assistant", "content": "hello"}, "done": False}),
+        json.dumps({"model": "m", "done": True}),
+    ]
+    response = _FakeOllamaResponse(lines)
+    chunks = asyncio.run(_collect_async(_stream_filter_thinking(response, include_thinking=False)))
+    decoded = [json.loads(c) for c in chunks]
+
+    assert len(decoded) == 2
+    assert decoded[0]["message"]["content"] == "hello"
